@@ -4,7 +4,6 @@ import random
 import numpy as np
 import cv2
 import pydicom
-import matplotlib.pyplot as plt
 from scipy.ndimage import gaussian_filter
 from tensorflow.keras.models import load_model
 from flask import Flask, request, jsonify, send_from_directory
@@ -15,6 +14,12 @@ app = Flask(__name__)
 CORS(app)
 
 # ===============================
+# MEMORY OPTIMIZATION (IMPORTANT)
+# ===============================
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+
+# ===============================
 # FOLDERS
 # ===============================
 os.makedirs("uploads", exist_ok=True)
@@ -22,44 +27,51 @@ os.makedirs("static/processed", exist_ok=True)
 os.makedirs("model", exist_ok=True)
 
 # ===============================
-# GOOGLE DRIVE MODEL ID (193 MB)
+# MODEL CONFIG
 # ===============================
 FILE_ID = "1m9j9KzQmyi293_Rlrv4jFlRrA_kMkGj1"
 MODEL_PATH = "model/model_small.h5"
 
 # ===============================
-# SAFE DOWNLOAD FUNCTION
+# LAZY MODEL LOADING (FIX CRASH)
+# ===============================
+model = None
+
+def get_model():
+    global model
+    if model is None:
+        print("[INFO] Loading model...")
+        model = load_model(MODEL_PATH, compile=False)
+        print("[INFO] Model loaded successfully")
+    return model
+
+# ===============================
+# SAFE DOWNLOAD
 # ===============================
 def safe_download(file_id, output_path, retries=3):
     if os.path.exists(output_path):
-        print(f"[INFO] {output_path} already exists")
+        print(f"[INFO] Model already exists")
         return
 
     url = f"https://drive.google.com/uc?id={file_id}"
 
     for i in range(retries):
         try:
-            print(f"[DOWNLOAD] {output_path} attempt {i+1}")
+            print(f"[DOWNLOAD] attempt {i+1}")
             gdown.download(url, output_path, quiet=False)
 
             if os.path.exists(output_path) and os.path.getsize(output_path) > 10 * 1024 * 1024:
-                print(f"[SUCCESS] Download complete: {output_path}")
+                print("[SUCCESS] Model downloaded")
                 return
 
         except Exception as e:
             print(f"[ERROR] Attempt {i+1}: {e}")
             time.sleep(5)
 
-    raise Exception(f"Failed to download {output_path}")
+    raise Exception("Model download failed")
 
-# ===============================
-# DOWNLOAD & LOAD MODEL
-# ===============================
+# Download model once at startup
 safe_download(FILE_ID, MODEL_PATH)
-
-print("[INFO] Loading model...")
-model = load_model(MODEL_PATH, compile=False)
-print("[INFO] Model loaded successfully")
 
 # ===============================
 # LABELS
@@ -81,7 +93,7 @@ hemorrhage_descriptions = {
 }
 
 # ===============================
-# IMAGE PROCESSING
+# IMAGE PROCESSING (OPTIMIZED)
 # ===============================
 def hu_normalization(image, slope, intercept):
     return image * slope + intercept
@@ -90,7 +102,7 @@ def window_image(image, center, width):
     min_val = center - width / 2
     max_val = center + width / 2
     img = np.clip(image, min_val, max_val)
-    img = (img - min_val) / (max_val - min_val)
+    img = (img - min_val) / (max_val - min_val + 1e-6)
     return (img * 255).astype(np.uint8)
 
 def sharpen(img):
@@ -112,17 +124,18 @@ def preprocess_dicom(path):
     bone = cv2.resize(bone, (256, 256))
 
     img = cv2.merge([brain, subdural, bone])
-
-    model_input = np.expand_dims(img, axis=0)
+    img = np.expand_dims(img, axis=0)
 
     filename = f"processed_{random.randint(1000,9999)}.png"
     path_out = os.path.join("static/processed", filename)
-    plt.imsave(path_out, img)
 
-    return model_input, path_out
+    # FIX: replace matplotlib (heavy) with OpenCV
+    cv2.imwrite(path_out, cv2.cvtColor(img[0], cv2.COLOR_RGB2BGR))
+
+    return img, path_out
 
 # ===============================
-# SEVERITY FUNCTION
+# SEVERITY
 # ===============================
 def classify_severity(score):
     if score < 0.3:
@@ -145,6 +158,7 @@ def predict():
         return jsonify({"error": "No file uploaded"}), 400
 
     file = request.files["file"]
+
     if file.filename == "":
         return jsonify({"error": "No file selected"}), 400
 
@@ -153,7 +167,11 @@ def predict():
 
     try:
         model_input, img_path = preprocess_dicom(path)
-        prediction = model.predict(model_input)
+
+        # 🔥 lazy model load (CRITICAL FIX)
+        m = get_model()
+
+        prediction = m.predict(model_input, verbose=0)
 
         label = class_labels[np.argmax(prediction)]
         confidence = float(np.max(prediction))
@@ -173,7 +191,8 @@ def predict():
         return jsonify({"error": str(e)}), 500
 
 # ===============================
-# START APP
+# START APP (RENDER SAFE)
 # ===============================
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
