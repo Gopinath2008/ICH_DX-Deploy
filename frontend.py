@@ -406,7 +406,7 @@ if classify_btn and uploaded_file is not None:
         with open("temp.dcm", "wb") as f:
             f.write(uploaded_file.read())
         with open("temp.dcm", "rb") as f:
-            response = requests.post(BACKEND_URL, files={"file": f})
+            response = requests.post(BACKEND_URL, files={"file": f}, timeout=120)
 
     if response.status_code == 200:
         result = response.json()
