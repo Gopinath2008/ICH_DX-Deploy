@@ -1,56 +1,84 @@
 import os
+import time
+import random
 import numpy as np
 import cv2
 import pydicom
 import matplotlib.pyplot as plt
 from scipy.ndimage import gaussian_filter
 from tensorflow.keras.models import load_model
-import random
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
-import gdown   # ✅ ADDED
+import gdown
 
 app = Flask(__name__)
 CORS(app)
 
-# Ensure folders exist
-output_dir = "static/processed"
-os.makedirs(output_dir, exist_ok=True)
+# ===============================
+# FOLDERS
+# ===============================
 os.makedirs("uploads", exist_ok=True)
+os.makedirs("static/processed", exist_ok=True)
 os.makedirs("model", exist_ok=True)
 
 # ===============================
-# 🔥 GOOGLE DRIVE MODEL LOADER
+# GOOGLE DRIVE MODEL IDS (YOUR FILES)
 # ===============================
+FILE_ID_1 = "1dUAZK5KA2vFCowjKSx2pf0TP-LT2i_8-"   # 1.12 GB
+FILE_ID_2 = "1m9j9KzQmyi293_Rlrv4jFlRrA_kMkGj1"   # 193 MB
 
-MODEL_PATH_1 = "model/ICH-combined1.h5"
-MODEL_PATH_2 = "model/ICH-combined2.h5"
+MODEL_PATH_1 = "model/model_large.h5"
+MODEL_PATH_2 = "model/model_small.h5"
 
-FILE_ID_1 = "YOUR_FILE_ID_1"
-FILE_ID_2 = "YOUR_FILE_ID_2"
+# ===============================
+# SAFE DOWNLOAD FUNCTION
+# ===============================
+def safe_download(file_id, output_path, retries=3):
+    if os.path.exists(output_path):
+        print(f"[INFO] {output_path} already exists")
+        return
 
-def download_model(file_id, output_path):
-    if not os.path.exists(output_path):
-        print(f"Downloading {output_path} from Google Drive...")
-        url = f"https://drive.google.com/uc?id={file_id}"
-        gdown.download(url, output_path, quiet=False)
-        print(f"{output_path} downloaded successfully.")
-    else:
-        print(f"{output_path} already exists.")
+    url = f"https://drive.google.com/uc?id={file_id}"
 
-# Download models before loading
-download_model(FILE_ID_1, MODEL_PATH_1)
-download_model(FILE_ID_2, MODEL_PATH_2)
+    for i in range(retries):
+        try:
+            print(f"[DOWNLOAD] {output_path} attempt {i+1}")
+            gdown.download(url, output_path, quiet=False)
 
-# Load models
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 10 * 1024 * 1024:
+                print(f"[SUCCESS] Download complete: {output_path}")
+                return
+
+        except Exception as e:
+            print(f"[ERROR] Attempt {i+1}: {e}")
+            time.sleep(5)
+
+    raise Exception(f"Failed to download {output_path}")
+
+# ===============================
+# DOWNLOAD MODELS (SAFE ORDER)
+# ===============================
+safe_download(FILE_ID_2, MODEL_PATH_2)  # 193MB first
+safe_download(FILE_ID_1, MODEL_PATH_1)  # 1.12GB second
+
+# ===============================
+# LOAD MODELS
+# ===============================
+print("[INFO] Loading models...")
 model1 = load_model(MODEL_PATH_1, compile=False)
 model2 = load_model(MODEL_PATH_2, compile=False)
+print("[INFO] Models loaded successfully")
 
 # ===============================
-# Labels and descriptions
+# LABELS
 # ===============================
-
-class_labels = ["Epidural", "Intraparenchymal", "Intraventricular", "Subarachnoid", "Subdural"]
+class_labels = [
+    "Epidural",
+    "Intraparenchymal",
+    "Intraventricular",
+    "Subarachnoid",
+    "Subdural"
+]
 
 hemorrhage_descriptions = {
     "Epidural": "A collection of blood between the skull and dura mater. Often due to trauma and may require surgery.",
@@ -61,67 +89,64 @@ hemorrhage_descriptions = {
 }
 
 # ===============================
-# Helper functions
+# IMAGE PROCESSING
 # ===============================
-
-def classify_severity(prediction_score):
-    if prediction_score < 0.3:
-        return "Mild", "Observation and follow-up recommended. No immediate intervention required."
-    elif 0.3 <= prediction_score < 0.7:
-        return "Moderate", "Monitoring in a hospital setting is advised. CT scans may be needed."
-    else:
-        return "Severe", "Immediate medical attention required. Possible surgical intervention needed."
-
 def hu_normalization(image, slope, intercept):
     return image * slope + intercept
 
-def window_image(image, window_center, window_width):
-    window_min = window_center - window_width / 2
-    window_max = window_center + window_width / 2
-    windowed = np.clip(image, window_min, window_max)
-    windowed = (windowed - window_min) / (window_max - window_min)
-    return (windowed * 255).astype(np.uint8)
+def window_image(image, center, width):
+    min_val = center - width / 2
+    max_val = center + width / 2
+    img = np.clip(image, min_val, max_val)
+    img = (img - min_val) / (max_val - min_val)
+    return (img * 255).astype(np.uint8)
 
-def apply_sharpening(image):
-    blurred = gaussian_filter(image, sigma=1)
-    return cv2.addWeighted(image, 1.5, blurred, -0.5, 0)
+def sharpen(img):
+    blur = gaussian_filter(img, sigma=1)
+    return cv2.addWeighted(img, 1.5, blur, -0.5, 0)
 
-# ===============================
-# DICOM preprocessing
-# ===============================
-
-def preprocess_dicom(dicom_path, target_size=(256, 256)):
-    dcm = pydicom.dcmread(dicom_path)
+def preprocess_dicom(path):
+    dcm = pydicom.dcmread(path)
     image = dcm.pixel_array.astype(np.float32)
 
-    hu_image = hu_normalization(image, dcm.RescaleSlope, dcm.RescaleIntercept)
+    hu = hu_normalization(image, dcm.RescaleSlope, dcm.RescaleIntercept)
 
-    brain_window = window_image(hu_image, 40, 80)
-    subdural_window = window_image(hu_image, 80, 200)
-    bone_window = window_image(hu_image, 600, 2800)
+    brain = sharpen(window_image(hu, 40, 80))
+    subdural = sharpen(window_image(hu, 80, 200))
+    bone = sharpen(window_image(hu, 600, 2800))
 
-    brain = cv2.resize(apply_sharpening(brain_window), target_size)
-    subdural = cv2.resize(apply_sharpening(subdural_window), target_size)
-    bone = cv2.resize(apply_sharpening(bone_window), target_size)
+    brain = cv2.resize(brain, (256, 256))
+    subdural = cv2.resize(subdural, (256, 256))
+    bone = cv2.resize(bone, (256, 256))
 
-    three_channel = cv2.merge([brain, subdural, bone])
+    img = cv2.merge([brain, subdural, bone])
 
-    model1_input = np.expand_dims(np.stack([three_channel] * 5, axis=0), axis=0)
-    model2_input = np.expand_dims(three_channel, axis=0)
+    model1_input = np.expand_dims(np.stack([img] * 5, axis=0), axis=0)
+    model2_input = np.expand_dims(img, axis=0)
 
     filename = f"processed_{random.randint(1000,9999)}.png"
-    path = os.path.join("static/processed", filename)
+    path_out = os.path.join("static/processed", filename)
 
-    plt.imsave(path, three_channel)
+    plt.imsave(path_out, img)
 
-    return model1_input, model2_input, path
+    return model1_input, model2_input, path_out
 
 # ===============================
-# Routes
+# SEVERITY FUNCTION
 # ===============================
+def classify_severity(score):
+    if score < 0.3:
+        return "Mild", "Observation only"
+    elif score < 0.7:
+        return "Moderate", "Hospital monitoring required"
+    else:
+        return "Severe", "Immediate medical attention required"
 
+# ===============================
+# ROUTES
+# ===============================
 @app.route("/processed/<filename>")
-def get_processed_image(filename):
+def get_image(filename):
     return send_from_directory("static/processed", filename)
 
 @app.route("/predict", methods=["POST"])
@@ -134,38 +159,36 @@ def predict():
     if file.filename == "":
         return jsonify({"error": "No file selected"}), 400
 
-    dicom_path = os.path.join("uploads", file.filename)
-    file.save(dicom_path)
+    path = os.path.join("uploads", file.filename)
+    file.save(path)
 
     try:
-        model1_input, model2_input, processed_image_path = preprocess_dicom(dicom_path)
+        m1, m2, img_path = preprocess_dicom(path)
 
-        predictions1 = model1.predict(model1_input)
-        predictions2 = model2.predict(model2_input)
+        p1 = model1.predict(m1)
+        p2 = model2.predict(m2)
 
-        avg_prediction = (predictions1 + predictions2) / 2   # ✅ FIXED
+        avg = (p1 + p2) / 2
 
-        predicted_label = class_labels[np.argmax(avg_prediction)]
-        confidence = float(np.max(avg_prediction))
+        label = class_labels[np.argmax(avg)]
+        confidence = float(np.max(avg))
 
-        severity, recommendation = classify_severity(confidence)
-        description = hemorrhage_descriptions.get(predicted_label, "N/A")
+        severity, advice = classify_severity(confidence)
 
         return jsonify({
-            "image_url": processed_image_path,
-            "Predicted Hemorrhage Type": predicted_label,
-            "Confidence": confidence,
-            "Description": description,
-            "Severity Level": severity,
-            "Medical Suggestions": recommendation
+            "image_url": img_path,
+            "prediction": label,
+            "confidence": confidence,
+            "description": hemorrhage_descriptions[label],
+            "severity": severity,
+            "advice": advice
         })
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 # ===============================
-# Run app
+# START APP
 # ===============================
-
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
