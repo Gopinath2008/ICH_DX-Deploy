@@ -6,10 +6,8 @@ pydicom==3.0.1
 matplotlib==3.9.2
 tensorflow==2.18.0
 keras==3.8.0
-gunicorn==23.0.0
 streamlit==1.41.1
 requests==2.32.3
-Pillow==11.0.0
 h5py==3.12.1
 gdown
 scipy==1.15.2
