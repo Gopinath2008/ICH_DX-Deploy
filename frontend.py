@@ -4,7 +4,7 @@ import os
 import base64
 import datetime
 
-BACKEND_URL = "http://192.168.1.44:5000/predict"
+BACKEND_URL = "https://ich-dx-deploy-1.onrender.com/predict"
 LOGO_PATH = "logo.png"
 st.set_page_config(page_title="ICH-DX · Classifier", layout="centered", page_icon="🧠")
 
