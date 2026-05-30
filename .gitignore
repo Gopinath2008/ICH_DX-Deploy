@@ -1,0 +1,7 @@
+ICH-combined 1.h5
+ICH-combined 2.h5
+uploads/*
+static/processed/*
+temp.dcm
+__pycache__/
+*.pyc
