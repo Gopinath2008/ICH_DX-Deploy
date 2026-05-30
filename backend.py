@@ -22,13 +22,10 @@ os.makedirs("static/processed", exist_ok=True)
 os.makedirs("model", exist_ok=True)
 
 # ===============================
-# GOOGLE DRIVE MODEL IDS (YOUR FILES)
+# GOOGLE DRIVE MODEL ID (193 MB)
 # ===============================
-FILE_ID_1 = "1dUAZK5KA2vFCowjKSx2pf0TP-LT2i_8-"   # 1.12 GB
-FILE_ID_2 = "1m9j9KzQmyi293_Rlrv4jFlRrA_kMkGj1"   # 193 MB
-
-MODEL_PATH_1 = "model/model_large.h5"
-MODEL_PATH_2 = "model/model_small.h5"
+FILE_ID = "1m9j9KzQmyi293_Rlrv4jFlRrA_kMkGj1"
+MODEL_PATH = "model/model_small.h5"
 
 # ===============================
 # SAFE DOWNLOAD FUNCTION
@@ -56,18 +53,13 @@ def safe_download(file_id, output_path, retries=3):
     raise Exception(f"Failed to download {output_path}")
 
 # ===============================
-# DOWNLOAD MODELS (SAFE ORDER)
+# DOWNLOAD & LOAD MODEL
 # ===============================
-safe_download(FILE_ID_2, MODEL_PATH_2)  # 193MB first
-safe_download(FILE_ID_1, MODEL_PATH_1)  # 1.12GB second
+safe_download(FILE_ID, MODEL_PATH)
 
-# ===============================
-# LOAD MODELS
-# ===============================
-print("[INFO] Loading models...")
-model1 = load_model(MODEL_PATH_1, compile=False)
-model2 = load_model(MODEL_PATH_2, compile=False)
-print("[INFO] Models loaded successfully")
+print("[INFO] Loading model...")
+model = load_model(MODEL_PATH, compile=False)
+print("[INFO] Model loaded successfully")
 
 # ===============================
 # LABELS
@@ -121,15 +113,13 @@ def preprocess_dicom(path):
 
     img = cv2.merge([brain, subdural, bone])
 
-    model1_input = np.expand_dims(np.stack([img] * 5, axis=0), axis=0)
-    model2_input = np.expand_dims(img, axis=0)
+    model_input = np.expand_dims(img, axis=0)
 
     filename = f"processed_{random.randint(1000,9999)}.png"
     path_out = os.path.join("static/processed", filename)
-
     plt.imsave(path_out, img)
 
-    return model1_input, model2_input, path_out
+    return model_input, path_out
 
 # ===============================
 # SEVERITY FUNCTION
@@ -155,7 +145,6 @@ def predict():
         return jsonify({"error": "No file uploaded"}), 400
 
     file = request.files["file"]
-
     if file.filename == "":
         return jsonify({"error": "No file selected"}), 400
 
@@ -163,25 +152,21 @@ def predict():
     file.save(path)
 
     try:
-        m1, m2, img_path = preprocess_dicom(path)
+        model_input, img_path = preprocess_dicom(path)
+        prediction = model.predict(model_input)
 
-        p1 = model1.predict(m1)
-        p2 = model2.predict(m2)
-
-        avg = (p1 + p2) / 2
-
-        label = class_labels[np.argmax(avg)]
-        confidence = float(np.max(avg))
+        label = class_labels[np.argmax(prediction)]
+        confidence = float(np.max(prediction))
 
         severity, advice = classify_severity(confidence)
 
         return jsonify({
             "image_url": img_path,
-            "prediction": label,
-            "confidence": confidence,
-            "description": hemorrhage_descriptions[label],
-            "severity": severity,
-            "advice": advice
+            "Predicted Hemorrhage Type": label,
+            "Confidence": confidence,
+            "Description": hemorrhage_descriptions[label],
+            "Severity Level": severity,
+            "Medical Suggestions": advice
         })
 
     except Exception as e:
